@@ -1,5 +1,6 @@
 #include "QGCMcpControlServer.h"
 
+#include <QtCore/QDateTime>
 #include <QtCore/QFileInfo>
 #include <QtCore/QJsonArray>
 #include <QtCore/QJsonDocument>
@@ -9,10 +10,13 @@
 #include <QtNetwork/QHostAddress>
 #include <cmath>
 
+#include "BatteryFactGroupListModel.h"
 #include "Fact.h"
+#include "HealthAndArmingCheckReport.h"
 #include "MissionController.h"
 #include "MultiVehicleManager.h"
 #include "QGCLoggingCategory.h"
+#include "QGCMAVLink.h"
 #include "QmlObjectListModel.h"
 #include "RallyPoint.h"
 #include "SimpleMissionItem.h"
@@ -25,6 +29,15 @@ namespace {
 
 constexpr qsizetype MAX_REQUEST_BYTES = 1024 * 1024;
 constexpr qsizetype MAX_PLAN_FILE_BYTES = 10 * 1024 * 1024;
+
+QJsonValue finiteFactValue(Fact* fact)
+{
+    if (!fact) {
+        return QJsonValue(QJsonValue::Null);
+    }
+    const double value = fact->rawValue().toDouble();
+    return std::isfinite(value) ? QJsonValue(value) : QJsonValue(QJsonValue::Null);
+}
 
 bool secureEquals(const QByteArray& first, const QByteArray& second)
 {
@@ -44,6 +57,13 @@ bool secureEquals(const QByteArray& first, const QByteArray& second)
 QGCMcpControlServer::QGCMcpControlServer(QObject* parent)
     : QObject(parent), _httpServer(this), _tcpServer(this), _planController(this)
 {
+    MultiVehicleManager* manager = MultiVehicleManager::instance();
+    (void) connect(manager, &MultiVehicleManager::vehicleAdded, this, &QGCMcpControlServer::_trackVehicle);
+    const QmlObjectListModel* vehicleModel = manager->vehicles();
+    for (int index = 0; index < vehicleModel->count(); ++index) {
+        _trackVehicle(vehicleModel->value<Vehicle*>(index));
+    }
+
     _planController.setFlyView(false);
     _planController.start();
 }
@@ -134,6 +154,12 @@ bool QGCMcpControlServer::_isAuthorized(const QHttpServerRequest& request) const
 
 QGCMcpControlServer::ActionResult QGCMcpControlServer::_dispatch(const QString& name, const QJsonObject& arguments)
 {
+    if (name == QStringLiteral("get_health")) {
+        return _health(arguments);
+    }
+    if (name == QStringLiteral("get_command_status")) {
+        return _commandStatus(arguments);
+    }
     if ((name == QStringLiteral("get_status")) || (name == QStringLiteral("select_vehicle")) ||
         name.startsWith(QLatin1String("vehicle_"))) {
         if (name == QStringLiteral("get_status")) {
@@ -175,6 +201,156 @@ QGCMcpControlServer::ActionResult QGCMcpControlServer::_status(const QJsonObject
     return _success(result);
 }
 
+QGCMcpControlServer::ActionResult QGCMcpControlServer::_health(const QJsonObject& arguments)
+{
+    QString error;
+    Vehicle* vehicle = _vehicle(arguments, error);
+    if (!vehicle) {
+        return _failure(error);
+    }
+
+    HealthAndArmingCheckReport* report = vehicle->healthAndArmingCheckReport();
+    QJsonArray problems;
+    if (report) {
+        QmlObjectListModel* problemModel = report->problemsForCurrentMode();
+        for (int index = 0; index < problemModel->count(); ++index) {
+            HealthAndArmingCheckProblem* problem = problemModel->value<HealthAndArmingCheckProblem*>(index);
+            if (problem) {
+                problems.append(QJsonObject{{QStringLiteral("message"), problem->message()},
+                                            {QStringLiteral("description"), problem->description()},
+                                            {QStringLiteral("severity"), problem->severity()}});
+            }
+        }
+    }
+
+    QJsonArray batteries;
+    QmlObjectListModel* batteryModel = vehicle->batteries();
+    for (int index = 0; index < batteryModel->count(); ++index) {
+        BatteryFactGroup* battery = batteryModel->value<BatteryFactGroup*>(index);
+        if (battery) {
+            batteries.append(
+                QJsonObject{{QStringLiteral("id"), finiteFactValue(battery->id())},
+                            {QStringLiteral("percent_remaining"), finiteFactValue(battery->percentRemaining())},
+                            {QStringLiteral("voltage_v"), finiteFactValue(battery->voltage())},
+                            {QStringLiteral("current_a"), finiteFactValue(battery->current())},
+                            {QStringLiteral("temperature_c"), finiteFactValue(battery->temperature())},
+                            {QStringLiteral("charge_state"), finiteFactValue(battery->chargeState())}});
+        }
+    }
+
+    const bool reportSupported = report && report->supported();
+    const bool canArm = reportSupported ? report->canArm()
+                                        : (vehicle->readyToFlyAvailable()
+                                               ? vehicle->readyToFly()
+                                               : (vehicle->allSensorsHealthy() && vehicle->prearmError().isEmpty()));
+    const QJsonValue readyToFly =
+        vehicle->readyToFlyAvailable() ? QJsonValue(vehicle->readyToFly()) : QJsonValue(QJsonValue::Null);
+
+    return _success(QJsonObject{
+        {QStringLiteral("vehicle_id"), vehicle->id()},
+        {QStringLiteral("can_arm"), canArm},
+        {QStringLiteral("can_takeoff"), reportSupported ? report->canTakeoff() : canArm},
+        {QStringLiteral("can_start_mission"), reportSupported ? report->canStartMission() : canArm},
+        {QStringLiteral("ready_to_fly"), readyToFly},
+        {QStringLiteral("ready_to_fly_available"), vehicle->readyToFlyAvailable()},
+        {QStringLiteral("all_sensors_healthy"), vehicle->allSensorsHealthy()},
+        {QStringLiteral("prearm_error"), vehicle->prearmError()},
+        {QStringLiteral("gps_state"), reportSupported ? report->gpsState() : QString()},
+        {QStringLiteral("health_report_supported"), reportSupported},
+        {QStringLiteral("has_warnings_or_errors"), reportSupported && report->hasWarningsOrErrors()},
+        {QStringLiteral("sensor_bits"), QJsonObject{{QStringLiteral("present"), vehicle->sensorsPresentBits()},
+                                                    {QStringLiteral("enabled"), vehicle->sensorsEnabledBits()},
+                                                    {QStringLiteral("healthy"), vehicle->sensorsHealthBits()},
+                                                    {QStringLiteral("unhealthy"), vehicle->sensorsUnhealthyBits()}}},
+        {QStringLiteral("link"),
+         QJsonObject{{QStringLiteral("messages_received"), static_cast<double>(vehicle->mavlinkReceivedCount())},
+                     {QStringLiteral("messages_sent"), static_cast<double>(vehicle->mavlinkSentCount())},
+                     {QStringLiteral("messages_lost"), static_cast<double>(vehicle->mavlinkLossCount())},
+                     {QStringLiteral("loss_percent"), vehicle->mavlinkLossPercent()}}},
+        {QStringLiteral("batteries"), batteries},
+        {QStringLiteral("problems"), problems},
+    });
+}
+
+QGCMcpControlServer::ActionResult QGCMcpControlServer::_commandStatus(const QJsonObject& arguments)
+{
+    const QJsonValue afterValue = arguments.value(QStringLiteral("after_sequence"));
+    const double afterNumeric = afterValue.isUndefined() ? 0.0 : afterValue.toDouble(-1.0);
+    if (!std::isfinite(afterNumeric) || (afterNumeric < 0.0) || (std::floor(afterNumeric) != afterNumeric)) {
+        return _failure(QStringLiteral("after_sequence must be a non-negative integer"));
+    }
+    const quint64 afterSequence = static_cast<quint64>(afterNumeric);
+
+    const QJsonValue limitValue = arguments.value(QStringLiteral("limit"));
+    const double limitNumeric = limitValue.isUndefined() ? 20.0 : limitValue.toDouble(-1.0);
+    if (!std::isfinite(limitNumeric) || (limitNumeric < 1.0) || (limitNumeric > 100.0) ||
+        (std::floor(limitNumeric) != limitNumeric)) {
+        return _failure(QStringLiteral("limit must be an integer between 1 and 100"));
+    }
+    const int limit = static_cast<int>(limitNumeric);
+
+    int vehicleId = -1;
+    if (arguments.contains(QStringLiteral("vehicle_id"))) {
+        QString error;
+        Vehicle* vehicle = _vehicle(arguments, error);
+        if (!vehicle) {
+            return _failure(error);
+        }
+        vehicleId = vehicle->id();
+    }
+
+    int command = -1;
+    if (arguments.contains(QStringLiteral("command"))) {
+        const double commandNumeric = arguments.value(QStringLiteral("command")).toDouble(-1.0);
+        if (!std::isfinite(commandNumeric) || (commandNumeric < 0.0) || (commandNumeric > 65535.0) ||
+            (std::floor(commandNumeric) != commandNumeric)) {
+            return _failure(QStringLiteral("command must be an integer between 0 and 65535"));
+        }
+        command = static_cast<int>(commandNumeric);
+    }
+
+    int targetComponent = -1;
+    if (arguments.contains(QStringLiteral("target_component"))) {
+        const double componentNumeric = arguments.value(QStringLiteral("target_component")).toDouble(-1.0);
+        if (!std::isfinite(componentNumeric) || (componentNumeric < 0.0) || (componentNumeric > 255.0) ||
+            (std::floor(componentNumeric) != componentNumeric)) {
+            return _failure(QStringLiteral("target_component must be an integer between 0 and 255"));
+        }
+        targetComponent = static_cast<int>(componentNumeric);
+    }
+
+    QJsonArray matches;
+    for (const QJsonValue& value : std::as_const(_commandResults)) {
+        const QJsonObject result = value.toObject();
+        if ((static_cast<quint64>(result.value(QStringLiteral("sequence")).toDouble()) <= afterSequence) ||
+            ((vehicleId >= 0) && (result.value(QStringLiteral("vehicle_id")).toInt() != vehicleId)) ||
+            ((command >= 0) && (result.value(QStringLiteral("command")).toInt() != command)) ||
+            ((targetComponent >= 0) && (result.value(QStringLiteral("target_component")).toInt() != targetComponent))) {
+            continue;
+        }
+        matches.append(result);
+        if (matches.size() >= limit) {
+            break;
+        }
+    }
+
+    QJsonValue pending(QJsonValue::Null);
+    if (command >= 0) {
+        QString error;
+        Vehicle* vehicle = _vehicle(arguments, error);
+        if (vehicle) {
+            const int component = targetComponent >= 0 ? targetComponent : vehicle->defaultComponentId();
+            pending = vehicle->isMavCommandPending(component, static_cast<MAV_CMD>(command));
+        }
+    }
+
+    return _success(QJsonObject{
+        {QStringLiteral("latest_sequence"), static_cast<double>(_nextCommandSequence - 1)},
+        {QStringLiteral("pending"), pending},
+        {QStringLiteral("results"), matches},
+    });
+}
+
 QGCMcpControlServer::ActionResult QGCMcpControlServer::_vehicleAction(const QString& name, const QJsonObject& arguments)
 {
     if (name == QStringLiteral("select_vehicle")) {
@@ -203,6 +379,8 @@ QGCMcpControlServer::ActionResult QGCMcpControlServer::_vehicleAction(const QStr
     if (!_confirmed(arguments, error)) {
         return _failure(error);
     }
+
+    const quint64 commandStatusAfterSequence = _nextCommandSequence - 1;
 
     if (name == QStringLiteral("vehicle_set_armed")) {
         if (!arguments.value(QStringLiteral("armed")).isBool()) {
@@ -251,12 +429,18 @@ QGCMcpControlServer::ActionResult QGCMcpControlServer::_vehicleAction(const QStr
         return _failure(QStringLiteral("Unknown vehicle tool: %1").arg(name));
     }
 
-    return _success(
-        QJsonObject{{QStringLiteral("accepted"), true}, {QStringLiteral("vehicle"), _vehicleJson(vehicle)}});
+    return _success(QJsonObject{
+        {QStringLiteral("accepted"), true},
+        {QStringLiteral("command_status_after_sequence"), static_cast<double>(commandStatusAfterSequence)},
+        {QStringLiteral("vehicle"), _vehicleJson(vehicle)},
+    });
 }
 
 QGCMcpControlServer::ActionResult QGCMcpControlServer::_planAction(const QString& name, const QJsonObject& arguments)
 {
+    if (name == QStringLiteral("plan_validate")) {
+        return _planValidation(arguments);
+    }
     if (_planController.syncInProgress()) {
         return _failure(QStringLiteral("A plan upload or download is already in progress"));
     }
@@ -265,6 +449,21 @@ QGCMcpControlServer::ActionResult QGCMcpControlServer::_planAction(const QString
     if (name == QStringLiteral("plan_get")) {
         return _success(QJsonObject{{QStringLiteral("plan"), _planController.saveToJson().object()},
                                     {QStringLiteral("dirty_for_upload"), _planController.dirtyForUpload()}});
+    }
+    if (name == QStringLiteral("plan_download")) {
+        if (_planController.offline()) {
+            return _failure(QStringLiteral("No active vehicle is connected"));
+        }
+        if (_planController.dirtyForUpload() &&
+            !arguments.value(QStringLiteral("confirm_discard_local_changes")).toBool(false)) {
+            return _failure(
+                QStringLiteral("The editable plan has local changes; set confirm_discard_local_changes to true"));
+        }
+        _planController.loadFromVehicle();
+        if (!_planController.syncInProgress()) {
+            return _failure(QStringLiteral("QGroundControl could not start the plan download"));
+        }
+        return _success(QJsonObject{{QStringLiteral("accepted"), true}, {QStringLiteral("sync_in_progress"), true}});
     }
     if (name == QStringLiteral("plan_clear")) {
         _planController.removeAll();
@@ -353,6 +552,124 @@ QGCMcpControlServer::ActionResult QGCMcpControlServer::_planAction(const QString
 
     return _success(QJsonObject{{QStringLiteral("plan"), _planController.saveToJson().object()},
                                 {QStringLiteral("dirty_for_upload"), _planController.dirtyForUpload()}});
+}
+
+QGCMcpControlServer::ActionResult QGCMcpControlServer::_planValidation(const QJsonObject& arguments)
+{
+    QJsonArray errors;
+    QJsonArray warnings;
+    QJsonArray uploadBlockers;
+    QString readyForSave;
+    const int readyState = _planController.readyForSaveState();
+    switch (readyState) {
+        case VisualMissionItem::ReadyForSave:
+            readyForSave = QStringLiteral("ready");
+            break;
+        case VisualMissionItem::NotReadyForSaveTerrain:
+            readyForSave = QStringLiteral("waiting_for_terrain");
+            errors.append(QStringLiteral("The plan is waiting for terrain data"));
+            break;
+        case VisualMissionItem::NotReadyForSaveData:
+            readyForSave = QStringLiteral("incomplete_data");
+            errors.append(QStringLiteral("One or more mission items are incomplete"));
+            break;
+        default:
+            readyForSave = QStringLiteral("unknown");
+            errors.append(QStringLiteral("QGroundControl returned an unknown plan readiness state"));
+            break;
+    }
+
+    if (_planController.syncInProgress()) {
+        uploadBlockers.append(QStringLiteral("A plan upload or download is already in progress"));
+    }
+
+    int missionItemCount = 0;
+    int invalidCoordinateCount = 0;
+    int terrainCollisionCount = 0;
+    bool hasTakeoff = false;
+    bool hasLanding = false;
+    QmlObjectListModel* visualItems = _planController.missionController()->visualItems();
+    for (int index = 0; index < visualItems->count(); ++index) {
+        VisualMissionItem* item = visualItems->value<VisualMissionItem*>(index);
+        if (!item || item->homePosition()) {
+            continue;
+        }
+        ++missionItemCount;
+        hasTakeoff = hasTakeoff || item->isTakeoffItem();
+        hasLanding = hasLanding || item->isLandCommand();
+        if (item->specifiesCoordinate() && !item->coordinate().isValid()) {
+            ++invalidCoordinateCount;
+        }
+        if (item->terrainCollision()) {
+            ++terrainCollisionCount;
+        }
+    }
+
+    if (invalidCoordinateCount > 0) {
+        errors.append(QStringLiteral("%1 mission item(s) have invalid coordinates").arg(invalidCoordinateCount));
+    }
+    if (terrainCollisionCount > 0) {
+        warnings.append(QStringLiteral("%1 mission item(s) report a terrain collision").arg(terrainCollisionCount));
+    }
+    if (missionItemCount == 0) {
+        warnings.append(QStringLiteral("The mission is empty"));
+    } else {
+        if (!hasTakeoff) {
+            warnings.append(QStringLiteral("The mission has no explicit takeoff item"));
+        }
+        if (!hasLanding) {
+            warnings.append(QStringLiteral("The mission has no explicit landing item"));
+        }
+    }
+
+    QString uploadPrecheck;
+    const MissionController::SendToVehiclePreCheckState preCheck =
+        _planController.missionController()->sendToVehiclePreCheck();
+    switch (preCheck) {
+        case MissionController::SendToVehiclePreCheckStateOk:
+            uploadPrecheck = QStringLiteral("ok");
+            break;
+        case MissionController::SendToVehiclePreCheckStateNoActiveVehicle:
+            uploadPrecheck = QStringLiteral("no_active_vehicle");
+            uploadBlockers.append(QStringLiteral("No active vehicle is connected"));
+            break;
+        case MissionController::SendToVehiclePreCheckStateFirwmareVehicleMismatch:
+            uploadPrecheck = QStringLiteral("firmware_vehicle_mismatch");
+            if (arguments.value(QStringLiteral("allow_firmware_mismatch")).toBool(false)) {
+                warnings.append(QStringLiteral("Plan firmware or vehicle type does not match the active vehicle"));
+            } else {
+                uploadBlockers.append(
+                    QStringLiteral("Plan firmware or vehicle type does not match the active vehicle"));
+            }
+            break;
+        case MissionController::SendToVehiclePreCheckStateActiveMission:
+            uploadPrecheck = QStringLiteral("active_mission");
+            uploadBlockers.append(QStringLiteral("Pause the active mission before uploading a replacement plan"));
+            break;
+    }
+
+    const QJsonObject plan = _planController.saveToJson().object();
+    const QJsonObject geoFence = plan.value(QStringLiteral("geoFence")).toObject();
+    const int rallyPointCount = _planController.rallyPointController()->points()->count();
+    const bool planValid = errors.isEmpty();
+    return _success(QJsonObject{
+        {QStringLiteral("plan_valid"), planValid},
+        {QStringLiteral("upload_ready"), planValid && uploadBlockers.isEmpty() && !_planController.syncInProgress()},
+        {QStringLiteral("ready_for_save"), readyForSave},
+        {QStringLiteral("upload_precheck"), uploadPrecheck},
+        {QStringLiteral("dirty_for_upload"), _planController.dirtyForUpload()},
+        {QStringLiteral("counts"),
+         QJsonObject{
+             {QStringLiteral("mission_items"), missionItemCount},
+             {QStringLiteral("rally_points"), rallyPointCount},
+             {QStringLiteral("geofence_circles"), geoFence.value(QStringLiteral("circles")).toArray().size()},
+             {QStringLiteral("geofence_polygons"), geoFence.value(QStringLiteral("polygons")).toArray().size()}}},
+        {QStringLiteral("has_takeoff"), hasTakeoff},
+        {QStringLiteral("has_landing"), hasLanding},
+        {QStringLiteral("errors"), errors},
+        {QStringLiteral("warnings"), warnings},
+        {QStringLiteral("upload_blockers"), uploadBlockers},
+    });
 }
 
 Vehicle* QGCMcpControlServer::_vehicle(const QJsonObject& arguments, QString& error) const
@@ -451,6 +768,38 @@ QJsonObject QGCMcpControlServer::_vehicleJson(Vehicle* vehicle)
                        {QStringLiteral("vehicle_type"), vehicle->vehicleTypeString()},
                        {QStringLiteral("coordinate"), coordinateJson(coordinate)},
                        {QStringLiteral("home"), coordinateJson(home)}};
+}
+
+void QGCMcpControlServer::_trackVehicle(Vehicle* vehicle)
+{
+    if (!vehicle) {
+        return;
+    }
+    (void) connect(vehicle, &Vehicle::mavCommandResult, this, &QGCMcpControlServer::_mavCommandResult,
+                   Qt::UniqueConnection);
+}
+
+void QGCMcpControlServer::_mavCommandResult(int vehicleId, int targetComponent, int command, int ackResult,
+                                            int failureCode)
+{
+    const auto typedFailureCode = static_cast<Vehicle::MavCmdResultFailureCode_t>(failureCode);
+    const bool accepted =
+        (typedFailureCode == Vehicle::MavCmdResultCommandResultOnly) && (ackResult == MAV_RESULT_ACCEPTED);
+    _commandResults.append(QJsonObject{
+        {QStringLiteral("sequence"), static_cast<double>(_nextCommandSequence++)},
+        {QStringLiteral("recorded_at"), QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
+        {QStringLiteral("vehicle_id"), vehicleId},
+        {QStringLiteral("target_component"), targetComponent},
+        {QStringLiteral("command"), command},
+        {QStringLiteral("ack_result"), ackResult},
+        {QStringLiteral("ack_result_name"), QGCMAVLink::mavResultToString(static_cast<uint8_t>(ackResult))},
+        {QStringLiteral("failure_code"), failureCode},
+        {QStringLiteral("failure"), Vehicle::mavCmdResultFailureCodeToString(typedFailureCode)},
+        {QStringLiteral("accepted"), accepted},
+    });
+    while (_commandResults.size() > MAX_COMMAND_RESULTS) {
+        _commandResults.removeAt(0);
+    }
 }
 
 QHttpServerResponse QGCMcpControlServer::_jsonResponse(const QJsonObject& json, QHttpServerResponse::StatusCode status)

@@ -19,3 +19,9 @@ with the same `QGC_MCP_TOKEN`.
 
 Live-flight actions and plan uploads require an explicit `confirm: true` argument. Plan editing tools operate
 on an isolated QGC `PlanMasterController` and do not change the vehicle until the upload tool is called.
+
+The adapter also exposes bounded state waiting, preflight and sensor health, recent terminal MAVLink command
+acknowledgements, explicit mission/geofence/rally download, and plan validation. Vehicle commands return a
+`command_status_after_sequence` watermark for querying acknowledgements that arrive after the request. Agents
+should use `qgc_wait_for_state` to verify asynchronous outcomes such as arming, reaching altitude, landing, and
+plan synchronization instead of assuming that an accepted command has completed.

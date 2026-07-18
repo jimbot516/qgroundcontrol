@@ -60,16 +60,35 @@ Set `QGC_MCP_URL` in the MCP server environment only when using a non-default lo
 
 The server exposes tools for:
 
-- reading vehicle and editable-plan state;
+- reading vehicle, preflight/health, command-acknowledgement, and editable-plan state;
+- waiting for asynchronous vehicle or plan state transitions with a bounded timeout;
 - selecting the active vehicle;
 - arming/disarming, takeoff, land, RTL, pause, and starting a mission;
 - guided go-to and live ROI control;
-- loading, saving, clearing, and inspecting QGC plans;
+- downloading, loading, saving, clearing, validating, and inspecting QGC plans;
 - appending takeoff, waypoint, ROI, and rally-point items;
 - uploading the complete plan to the active vehicle.
 
 Live-flight commands and plan upload require `confirm: true`. In-flight disarming is not exposed. Plan edits
 remain local until `qgc_plan_upload` is explicitly called.
+
+Vehicle actions are asynchronous. Their response includes `command_status_after_sequence`; pass that value to
+`qgc_get_command_status` to retrieve subsequent terminal MAVLink acknowledgements. Use `qgc_wait_for_state` for
+observable completion conditions such as arming, reaching altitude, landing, or plan synchronization:
+
+```json
+{
+  "armed": true,
+  "flying": true,
+  "minimum_altitude_m": 9.5,
+  "timeout_seconds": 30
+}
+```
+
+`qgc_plan_download` replaces the editable MCP plan with mission, geofence, and rally data from the active
+vehicle. If the editable plan has unuploaded changes, the caller must explicitly set
+`confirm_discard_local_changes: true`. Run `qgc_plan_validate` before uploads to receive structural errors,
+warnings, and upload blockers without changing the vehicle.
 
 ## Test
 
