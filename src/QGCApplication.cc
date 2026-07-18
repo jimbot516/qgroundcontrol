@@ -36,6 +36,7 @@
 #include "QGCImageProvider.h"
 #include "QGCLoggingCategory.h"
 #include "QGCLoggingCategoryManager.h"
+#include "QGCMcpControlServer.h"
 #include "QGCNetworkHelper.h"
 #include "SettingsManager.h"
 #include "Vehicle.h"
@@ -55,6 +56,8 @@ QGCApplication::QGCApplication(int& argc, char* argv[], const QGCCommandLinePars
       _simpleBootTest(cli.simpleBootTest),
       _fakeMobile(cli.fakeMobile),
       _logOutput(cli.logOutput),
+      _mcpControlEnabled(cli.mcpControl),
+      _mcpControlPort(cli.mcpControlPort),
       _systemId(cli.systemId.value_or(0))
 {
     _msecsElapsedTime.start();
@@ -307,6 +310,16 @@ void QGCApplication::_initForNormalAppBoot()
     NTRIPManager::instance()->init();
     LinkManager::instance()->init();
     VideoManager::instance()->init(mainRootWindow());
+
+    if (_mcpControlEnabled) {
+        const QByteArray token = qgetenv("QGC_MCP_TOKEN");
+        _mcpControlServer = new QGCMcpControlServer(this);
+        if (!_mcpControlServer->start(_mcpControlPort, token)) {
+            qCWarning(QGCApplicationLog) << "MCP control bridge was requested but could not start";
+            delete _mcpControlServer;
+            _mcpControlServer = nullptr;
+        }
+    }
 
     // Set the window icon now that custom plugin has a chance to override it
 #ifdef Q_OS_LINUX

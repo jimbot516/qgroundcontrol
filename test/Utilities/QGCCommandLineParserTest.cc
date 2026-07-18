@@ -35,6 +35,8 @@ void QGCCommandLineParserTest::_testDefaultResult()
 
     QCOMPARE(result.fakeMobile,           false);
     QCOMPARE(result.allowMultiple,        false);
+    QCOMPARE(result.mcpControl,            false);
+    QCOMPARE(result.mcpControlPort,        quint16(49300));
 
     QCOMPARE(result.useSwRast,            false);
     QCOMPARE(result.quietWindowsAsserts,  false);

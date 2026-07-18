@@ -76,6 +76,7 @@ tools/
 │   ├── qt6.natvis           # Visual Studio debugger visualizers
 │   └── valgrind.supp        # Valgrind suppressions
 ├── generators/                # Build-time code generation (mavlink enums, config/settings QML)
+├── mcp/                       # Local MCP server for authenticated agent control of QGC
 ├── schemas/                   # JSON schemas for editor validation
 ├── setup/                     # Environment setup scripts
 ├── simulation/                # Vehicle simulators

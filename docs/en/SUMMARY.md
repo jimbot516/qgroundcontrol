@@ -118,6 +118,7 @@
   - [Developer Tools](qgc-dev-guide/tools/index.md)
     - [Mock Link](qgc-dev-guide/tools/mock_link.md)
   - [Command Line Options](qgc-dev-guide/command_line_options.md)
+  - [MCP Agent Control](qgc-dev-guide/mcp_control.md)
   - [Custom Builds](qgc-dev-guide/custom_build/custom_build.md)
     - [Initial Repository Setup For Custom Build](qgc-dev-guide/custom_build/fork_repo.md)
     - [Custom Build Plugins](qgc-dev-guide/custom_build/plugins.md)
