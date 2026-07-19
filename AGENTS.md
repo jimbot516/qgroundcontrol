@@ -71,6 +71,15 @@ just info               # print resolved versions (Qt, CMake, GStreamer)
 - **Tight test loops** — iterate one test with `ctest -R <name>` (or `--gtest_filter`); only run the full label on the final pass. CI runs `ctest --output-on-failure -L Unit`.
 - **Match CI** — before running tests/lint locally, use the same command CI runs ([.github/ci-overview.md](.github/ci-overview.md)), not a local guess.
 
+## Local PX4 SITL
+
+- Use the existing PX4 checkout at `/Users/assistant/Desktop/PX4-Autopilot` whenever QGC work needs a real
+  PX4 application or flight-dynamics simulation. Do not clone another PX4 repository.
+- Before running PX4 build, tooling, or simulation commands, activate its virtual environment:
+  `source /Users/assistant/Desktop/PX4-Autopilot/.venv/bin/activate`.
+- For headless multirotor flight simulation, prefer PX4 SIH (`make px4_sitl_sih sihsim_quadx`) and set
+  `PX4_HOME_LAT`, `PX4_HOME_LON`, and `PX4_HOME_ALT` when the scenario needs a specific spawn location.
+
 ## Definition of Done
 
 Before considering a change complete:
