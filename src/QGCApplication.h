@@ -16,6 +16,7 @@ class QQmlApplicationEngine;
 class QQuickWindow;
 class QGCImageProvider;
 class QGCApplication;
+class QGCMcpControlServer;
 class QEvent;
 class QPostEventList;
 class QMetaMethod;
@@ -128,6 +129,8 @@ private:
     bool _simpleBootTest = false;
     bool _fakeMobile = false;    ///< true: Fake ui into displaying mobile interface
     bool _logOutput = false;    ///< true: Log Qt debug output to file
+    bool _mcpControlEnabled = false;
+    quint16 _mcpControlPort = 49300;
     quint8 _systemId = 0; ///< MAVLink system ID, 0 means not set
 
     static constexpr int _missingParamsDelayedDisplayTimerTimeout = 1000;   ///< Timeout to wait for next missing fact to come in before display
@@ -148,6 +151,7 @@ private:
     QElapsedTimer _msecsElapsedTime;
     bool _videoManagerInitialized = false;
     bool _bootTestPassed = true;
+    QGCMcpControlServer* _mcpControlServer = nullptr;
 
     QList<QPair<QString /* title */, QString /* message */>> _delayedAppMessages;
 

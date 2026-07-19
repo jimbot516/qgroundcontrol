@@ -28,6 +28,8 @@ constexpr QLatin1StringView kOptSimpleBoot    = QLatin1StringView("simple-boot-t
 // --- Desktop-only options ---
 constexpr QLatin1StringView kOptFakeMobile    = QLatin1StringView("fake-mobile");
 constexpr QLatin1StringView kOptAllowMultiple = QLatin1StringView("allow-multiple");
+constexpr QLatin1StringView kOptMcpControl     = QLatin1StringView("mcp-control");
+constexpr QLatin1StringView kOptMcpControlPort = QLatin1StringView("mcp-control-port");
 #endif
 
 #ifdef QGC_UNITTEST_BUILD
@@ -207,6 +209,18 @@ CommandLineParseResult parseCommandLine()
         QString(kOptAllowMultiple),
         QCoreApplication::translate("main", "Bypass single-instance guard."));
     (void) parser.addOption(allowMultipleOpt);
+
+    const QCommandLineOption mcpControlOpt(
+        QString(kOptMcpControl),
+        QCoreApplication::translate("main", "Enable the authenticated localhost MCP control bridge."));
+    (void) parser.addOption(mcpControlOpt);
+
+    const QCommandLineOption mcpControlPortOpt(
+        QString(kOptMcpControlPort),
+        QCoreApplication::translate("main", "Loopback port for the MCP control bridge."),
+        QCoreApplication::translate("main", "port"),
+        QStringLiteral("49300"));
+    (void) parser.addOption(mcpControlPortOpt);
 #endif
 
 #if defined(Q_OS_WIN) || defined(Q_OS_MACOS)
@@ -395,9 +409,23 @@ CommandLineParseResult parseCommandLine()
 #if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
     out.fakeMobile = parser.isSet(fakeMobileOpt);
     out.allowMultiple = parser.isSet(allowMultipleOpt);
+    out.mcpControl = parser.isSet(mcpControlOpt);
+    if (out.mcpControl) {
+        bool ok = false;
+        const uint port = parser.value(mcpControlPortOpt).toUInt(&ok);
+        if (!ok || (port < 1024) || (port > 65535)) {
+            out.statusCode = CommandLineParseResult::Status::Error;
+            out.errorString = QCoreApplication::translate("main", "Invalid MCP control port (must be 1024-65535): %1")
+                .arg(parser.value(mcpControlPortOpt));
+            qCWarning(QGCCommandLineParserLog) << out.errorString.value();
+            return out;
+        }
+        out.mcpControlPort = static_cast<quint16>(port);
+    }
 #else
     out.fakeMobile = false;
     out.allowMultiple = false;
+    out.mcpControl = false;
 #endif
 
     // --- Parse graphics options ---

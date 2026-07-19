@@ -7,6 +7,8 @@ target_sources(${CMAKE_PROJECT_NAME}
     PRIVATE
         QGCCorePlugin.cc
         QGCCorePlugin.h
+        QGCMcpControlServer.cc
+        QGCMcpControlServer.h
         QGCOptions.cc
         QGCOptions.h
         QmlComponentInfo.cc

@@ -51,6 +51,8 @@ struct CommandLineParseResult
     // --- Desktop options (not on Android/iOS) ---
     bool fakeMobile = false;
     bool allowMultiple = false;
+    bool mcpControl = false;              ///< Enable the authenticated localhost MCP control bridge
+    quint16 mcpControlPort = 49300;       ///< Loopback port for the MCP control bridge
 
     // --- Graphics options ---
     bool useSwRast = false;         ///< Windows/macOS: Force software OpenGL
